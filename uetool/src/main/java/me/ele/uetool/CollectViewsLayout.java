@@ -5,18 +5,21 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.*;
 import android.os.Build;
+import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Toast;
+
 import me.ele.uetool.base.DimenUtil;
 import me.ele.uetool.base.Element;
 import me.ele.uetool.base.ReflectionP;
 
 import java.lang.reflect.Field;
 import java.util.*;
+
 import me.ele.uetool.base.ReflectionP.Func;
 
 import static me.ele.uetool.base.DimenUtil.*;
@@ -31,6 +34,7 @@ public class CollectViewsLayout extends View {
 
     protected List<Element> elements = new ArrayList<>();
     protected Element childElement, parentElement;
+    private ICollectViewCompact collectViewCompact;
     protected Paint textPaint = new Paint() {
         {
             setAntiAlias(true);
@@ -72,80 +76,7 @@ public class CollectViewsLayout extends View {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        try {
-            final Activity targetActivity = UETool.getInstance().getTargetActivity();
-            final WindowManager windowManager = targetActivity.getWindowManager();
-
-            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.JELLY_BEAN) {
-                final Field mGlobalField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mGlobal");
-                mGlobalField.setAccessible(true);
-
-                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.M) {
-                    Field mViewsField = Class.forName("android.view.WindowManagerGlobal").getDeclaredField("mViews");
-                    mViewsField.setAccessible(true);
-                    List<View> views;
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                        views = (List<View>) mViewsField.get(mGlobalField.get(windowManager));
-                    } else {
-                        views = Arrays.asList((View[]) mViewsField.get(mGlobalField.get(windowManager)));
-                    }
-
-                    for (int i = views.size() - 1; i >= 0; i--) {
-                        View targetView = getTargetDecorView(targetActivity, views.get(i));
-                        if (targetView != null) {
-                            createElements(targetView);
-                            break;
-                        }
-                    }
-                } else {
-                    ReflectionP.breakAndroidP(new Func<Void>() {
-                        @Override
-                        public Void call() {
-                            try {
-                                Field mRootsField = Class.forName("android.view.WindowManagerGlobal").getDeclaredField("mRoots");
-                                mRootsField.setAccessible(true);
-                                List viewRootImpls;
-                                viewRootImpls = (List) mRootsField.get(mGlobalField.get(windowManager));
-                                for (int i = viewRootImpls.size() - 1; i >= 0; i--) {
-                                    Class clazz = Class.forName("android.view.ViewRootImpl");
-                                    Object object = viewRootImpls.get(i);
-                                    Field mWindowAttributesField = clazz.getDeclaredField("mWindowAttributes");
-                                    mWindowAttributesField.setAccessible(true);
-                                    Field mViewField = clazz.getDeclaredField("mView");
-                                    mViewField.setAccessible(true);
-                                    View decorView = (View) mViewField.get(object);
-                                    WindowManager.LayoutParams layoutParams = (WindowManager.LayoutParams) mWindowAttributesField.get(object);
-                                    if (layoutParams.getTitle().toString().contains(targetActivity.getClass().getName())
-                                            || getTargetDecorView(targetActivity, decorView) != null) {
-                                        createElements(decorView);
-                                        break;
-                                    }
-                                }
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                            return null;
-                        }
-                    });
-                }
-            } else {
-                // http://androidxref.com/4.1.1/xref/frameworks/base/core/java/android/view/WindowManagerImpl.java
-                Field mWindowManagerField = Class.forName("android.view.WindowManagerImpl$CompatModeWrapper").getDeclaredField("mWindowManager");
-                mWindowManagerField.setAccessible(true);
-                Field mViewsField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mViews");
-                mViewsField.setAccessible(true);
-                List<View> views = Arrays.asList((View[]) mViewsField.get(mWindowManagerField.get(windowManager)));
-                for (int i = views.size() - 1; i >= 0; i--) {
-                    View targetView = getTargetDecorView(targetActivity, views.get(i));
-                    if (targetView != null) {
-                        createElements(targetView);
-                        break;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        getCollectViewCompact().collectView();
     }
 
     @Override
@@ -331,5 +262,164 @@ public class CollectViewsLayout extends View {
 
     protected float getTextWidth(String text) {
         return textPaint.measureText(text);
+    }
+
+    @NonNull
+    private ICollectViewCompact getCollectViewCompact() {
+        if (collectViewCompact != null) {
+            return collectViewCompact;
+        }
+        int version = Build.VERSION.SDK_INT;
+        if (version >= Build.VERSION_CODES.Q) {
+            // (29, *)
+            collectViewCompact = new CollectViewCompactApi30Impl();
+        } else if (version > Build.VERSION_CODES.M) {
+            // (23, 29]
+            collectViewCompact = new CollectViewCompactApi23Impl();
+        } else if (version > Build.VERSION_CODES.JELLY_BEAN) {
+            // (16, 23]
+            collectViewCompact = new CollectViewCompactApi16Impl();
+        } else {
+            // (0, 16]
+            collectViewCompact = new CollectViewCompactBaseImpl();
+        }
+        return collectViewCompact;
+    }
+
+    private class CollectViewCompactBaseImpl implements ICollectViewCompact {
+        @Override
+        public void collectView() {
+            try {
+                final Activity targetActivity = UETool.getInstance().getTargetActivity();
+                final WindowManager windowManager = targetActivity.getWindowManager();
+                // http://androidxref.com/4.1.1/xref/frameworks/base/core/java/android/view/WindowManagerImpl.java
+                Field mWindowManagerField = Class.forName("android.view.WindowManagerImpl$CompatModeWrapper").getDeclaredField("mWindowManager");
+                mWindowManagerField.setAccessible(true);
+                Field mViewsField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mViews");
+                mViewsField.setAccessible(true);
+                List<View> views = Arrays.asList((View[]) mViewsField.get(mWindowManagerField.get(windowManager)));
+                for (int i = views.size() - 1; i >= 0; i--) {
+                    View targetView = getTargetDecorView(targetActivity, views.get(i));
+                    if (targetView != null) {
+                        createElements(targetView);
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+
+            }
+        }
+    }
+
+    private class CollectViewCompactApi16Impl implements ICollectViewCompact {
+        @Override
+        public void collectView() {
+            final Field mGlobalField;
+            final Activity targetActivity = UETool.getInstance().getTargetActivity();
+            final WindowManager windowManager = targetActivity.getWindowManager();
+            try {
+                mGlobalField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mGlobal");
+                mGlobalField.setAccessible(true);
+                Field mViewsField = Class.forName("android.view.WindowManagerGlobal").getDeclaredField("mViews");
+                mViewsField.setAccessible(true);
+                List<View> views;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                    views = (List<View>) mViewsField.get(mGlobalField.get(windowManager));
+                } else {
+                    views = Arrays.asList((View[]) mViewsField.get(mGlobalField.get(windowManager)));
+                }
+
+                for (int i = views.size() - 1; i >= 0; i--) {
+                    View targetView = getTargetDecorView(targetActivity, views.get(i));
+                    if (targetView != null) {
+                        createElements(targetView);
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private class CollectViewCompactApi23Impl implements ICollectViewCompact {
+        @Override
+        public void collectView() {
+            ReflectionP.breakAndroidP(new Func<Void>() {
+                @Override
+                public Void call() {
+                    try {
+                        final Activity targetActivity = UETool.getInstance().getTargetActivity();
+                        final WindowManager windowManager = targetActivity.getWindowManager();
+                        final Field mGlobalField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mGlobal");
+                        mGlobalField.setAccessible(true);
+                        Field mRootsField = Class.forName("android.view.WindowManagerGlobal").getDeclaredField("mRoots");
+                        mRootsField.setAccessible(true);
+                        List viewRootImpls;
+                        viewRootImpls = (List) mRootsField.get(mGlobalField.get(windowManager));
+                        for (int i = viewRootImpls.size() - 1; i >= 0; i--) {
+                            Class clazz = Class.forName("android.view.ViewRootImpl");
+                            Object object = viewRootImpls.get(i);
+
+                            Field mViewField = clazz.getDeclaredField("mView");
+                            mViewField.setAccessible(true);
+                            View decorView = (View) mViewField.get(object);
+                            Field mWindowAttributesField = clazz.getDeclaredField("mWindowAttributes");
+                            mWindowAttributesField.setAccessible(true);
+                            WindowManager.LayoutParams layoutParams = (WindowManager.LayoutParams) mWindowAttributesField.get(object);
+                            if (layoutParams.getTitle().toString().contains(targetActivity.getClass().getName())
+                                    || getTargetDecorView(targetActivity, decorView) != null) {
+                                createElements(decorView);
+                                break;
+                            }
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                    return null;
+                }
+            });
+        }
+    }
+
+    private class CollectViewCompactApi30Impl implements ICollectViewCompact {
+        @Override
+        public void collectView() {
+            try {
+                final Activity targetActivity = UETool.getInstance().getTargetActivity();
+                final WindowManager windowManager = targetActivity.getWindowManager();
+                final Field mGlobalField = Class.forName("android.view.WindowManagerImpl").getDeclaredField("mGlobal");
+                mGlobalField.setAccessible(true);
+                Field mRootsField = Class.forName("android.view.WindowManagerGlobal").getDeclaredField("mRoots");
+                mRootsField.setAccessible(true);
+                List viewRootImpls;
+                viewRootImpls = (List) mRootsField.get(mGlobalField.get(windowManager));
+                for (int i = viewRootImpls.size() - 1; i >= 0; i--) {
+                    Class clazz = Class.forName("android.view.ViewRootImpl");
+                    Object object = viewRootImpls.get(i);
+                    Field mViewField = clazz.getDeclaredField("mView");
+                    mViewField.setAccessible(true);
+                    View decorView = (View) mViewField.get(object);
+                    ViewGroup.LayoutParams lp = decorView.getLayoutParams();
+                    String title;
+                    if (lp instanceof WindowManager.LayoutParams) {
+                        title = ((WindowManager.LayoutParams) lp).getTitle().toString();
+                    } else {
+                        title = "";
+                    }
+                    if (title.contains(targetActivity.getClass().getSimpleName())
+                            || getTargetDecorView(targetActivity, decorView) != null) {
+                        createElements(decorView);
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private interface ICollectViewCompact {
+        void collectView();
     }
 }
